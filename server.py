@@ -3,14 +3,14 @@ import socket
 import typing as tp
 import subprocess
 
-HOST: str = os.getenv('HW1_HOST', 'localhost')
+import utils
+
+HOST: str = os.getenv('HW1_HOST', '')
 PORT: int = int(os.getenv('HW1_PORT', '8080'))
 QUIET: bool = True if os.getenv('HW1_QUIET', '') == '1' else False
 ROOT_DIR: str = os.getenv('HW1_DIRECTORY')
 USER_FILE: str = os.getenv('HW1_USERS')
 AUTH_DISABLED: bool = True if os.getenv('HW1_AUTH_DISABLED', '1') == '1' else False
-
-DEFAULT_PORT = 21
 
 
 class E(BaseException):
@@ -19,8 +19,10 @@ class E(BaseException):
 
 
 def gen_new_port() -> tp.Tuple[int, str]:
-    np = PORT
-    return np, f'127,0,0,1,{np // 256},{np % 256}'
+    # np = utils.get_random_port()
+    np = 9080
+    comma_separeted_host = utils.get_ip().replace('.', ',')
+    return np, f'{comma_separeted_host},{np // 256},{np % 256}'
 
 
 def join_path(*args) -> str:
@@ -56,18 +58,6 @@ class Err550ActionNotTaken(FtpError):
         super().__init__(b'550 Requested action not taken.')
 
 
-# def passive_server(sock: socket.socket, queue: threading.):
-#     print('PASSIVE START')
-#     conn, addr = sock.accept()
-#     print('GOT FROM ADDR', addr)
-#
-#     while True:
-#         data = conn.recv(1024)
-#         print('PASSIVE RECV', data)
-#         if not data:
-#             break
-
-
 class Session:
     socket_: socket.socket
     connection: tp.Optional[socket.socket] = None
@@ -88,9 +78,9 @@ class Session:
 
     def __init__(self):
         self.socket_ = socket.socket()
-        self.socket_.bind(('', DEFAULT_PORT))
+        self.socket_.bind((HOST, PORT))
         self.socket_.listen(1)
-        self.port = DEFAULT_PORT
+        self.port = PORT
 
         self.HANDLERS = {
             # login
@@ -232,6 +222,11 @@ class Session:
         self._send(b'200 Set')
 
     def _handle_quit(self, args: tp.Tuple[str]):
+        if self.passive_socket:
+            self.passive_socket.close()
+            self.passive_socket = None
+        self.passive_enabled = False
+
         self._send(b'221 Bye!')
 
     def _handle_port(self, args: tp.Tuple[str]):
@@ -248,7 +243,7 @@ class Session:
         new_port, port_msg = gen_new_port()
 
         self.passive_socket = socket.socket()
-        self.passive_socket.bind(('', new_port))
+        self.passive_socket.bind((HOST, new_port))
         self.passive_socket.listen(1)
         self.passive_enabled = True
 
@@ -489,6 +484,7 @@ class Session:
 
 
 def run():
+    print(f'Starting server at {utils.get_ip()}:{PORT}')
     s = Session()
     while True:
         try:

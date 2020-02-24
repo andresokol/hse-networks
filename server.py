@@ -8,7 +8,9 @@ PORT: int = int(os.getenv('HW1_PORT', '8080'))
 QUIET: bool = True if os.getenv('HW1_QUIET', '') == '1' else False
 ROOT_DIR: str = os.getenv('HW1_DIRECTORY')
 USER_FILE: str = os.getenv('HW1_USERS')
-AUTH_DISABLED: bool = True if os.getenv('HW1_AUTH_DISABLED') == '1' else False
+AUTH_DISABLED: bool = True if os.getenv('HW1_AUTH_DISABLED', '1') == '1' else False
+
+DEFAULT_PORT = 21
 
 
 class E(BaseException):
@@ -17,7 +19,7 @@ class E(BaseException):
 
 
 def gen_new_port() -> tp.Tuple[int, str]:
-    np = 9090
+    np = PORT
     return np, f'127,0,0,1,{np // 256},{np % 256}'
 
 
@@ -41,15 +43,44 @@ class FileStructure:
     Page = 'P'
 
 
+class FtpError(Exception):
+    message: bytes
+
+    def __init__(self, message: bytes):
+        super().__init__()
+        self.message = message
+
+
+class Err550ActionNotTaken(FtpError):
+    def __init__(self):
+        super().__init__(b'550 Requested action not taken.')
+
+
+# def passive_server(sock: socket.socket, queue: threading.):
+#     print('PASSIVE START')
+#     conn, addr = sock.accept()
+#     print('GOT FROM ADDR', addr)
+#
+#     while True:
+#         data = conn.recv(1024)
+#         print('PASSIVE RECV', data)
+#         if not data:
+#             break
+
+
 class Session:
     socket_: socket.socket
     connection: tp.Optional[socket.socket] = None
     port: int
 
     active_addr: tp.Optional[tp.Tuple[str, int]] = None
+    passive_enabled: bool = False
+    passive_socket: tp.Optional[socket.socket] = None
+
     current_dir: str = '.'
 
     username: tp.Optional[str] = None
+    password: tp.Optional[str] = None
     is_authorized: bool = False
 
     mode = Mode.Stream
@@ -57,16 +88,14 @@ class Session:
 
     def __init__(self):
         self.socket_ = socket.socket()
-        self.socket_.bind(('', PORT))
+        self.socket_.bind(('', DEFAULT_PORT))
         self.socket_.listen(1)
-        self.port = PORT
+        self.port = DEFAULT_PORT
 
         self.HANDLERS = {
             # login
             'USER': self._handle_user,
             'PASS': self._handle_pass,
-            # 'CDUP': ,
-            # 'SMNT': ,
 
             # system
             'SYST': self._handle_syst,
@@ -83,15 +112,17 @@ class Session:
             # dir
             'CDUP': self._handle_cdup,
             'CWD': self._handle_cwd,
-            'APPE': lambda x: x,
-            'DELE': lambda x: x,
-            'RMD': lambda x: x,
-            'MKD': lambda x: x,
-            'NLST': lambda x: x,
+            'APPE': self._handle_appe,
+            'DELE': self._handle_dele,
+            'RMD': self._handle_rmd,
+            'MKD': self._handle_mkd,
+            'NLST': self._handle_nlst,
+
+            # pasv
+            'PASV': self._handle_pasv,
 
             # settings
             'TYPE': self._handle_type,
-            'PASV': self._handle_pasv,
             'PORT': self._handle_port,
 
             'PWD': self._handle_pwd,
@@ -104,15 +135,19 @@ class Session:
         print(f'[{self.port}] SEND: {msg}')
         self.connection.send(msg + b'\r\n')
 
-    def _send_active(self, lines: tp.List[bytes]):
-        if not self.active_addr:
-            print('dafuq')
-            return
-
-        with socket.create_connection(self.active_addr) as connection:
-            for line in lines:
-                print(f'[{self.active_addr}] SEND ACTIVE: {line}')
-                connection.send(line + b'\r\n')
+    def _send_data(self, data: bytes):
+        self._send(b'150 File status okay; about to open data connection')
+        if self.passive_enabled:
+            print(f'Waiting passive data connection')
+            conn, addr = self.passive_socket.accept()
+            print(f'Got connection from {addr}')
+            conn.send(data + b'\r\n')
+            conn.close()
+        else:
+            with socket.create_connection(self.active_addr) as connection:
+                print(f'[{self.active_addr}] SEND ACTIVE: {data}')
+                connection.send(data + b'\r\n')
+        self._send(b'226 Closing data connection. Requested file action successful.')
 
     def _fetch_active(self):
         if not self.active_addr:
@@ -147,6 +182,13 @@ class Session:
         501 Syntax error in parameters or arguments.
         530 Not logged in.
         """
+        assert len(args) == 1
+        self.username = args[0]
+
+        if AUTH_DISABLED:
+            self._send(b'230 User logged in, proceed.')
+            return
+
         self._send(b'331 User name ok, need password')
 
     def _handle_pass(self, args: tp.Tuple[str]):
@@ -161,7 +203,14 @@ class Session:
         503 Bad sequence of commands.
         530 Not logged in.
         """
-        self._send(b'230 User logged in')
+        if AUTH_DISABLED:
+            self._send(b'230 User logged in')
+            return
+
+        assert len(args) == 1
+        self.password = args[0]
+
+        self._send(b'331 User name okay, need password.')
 
     def _handle_acct(self, args: tp.Tuple[str]):
         """
@@ -197,12 +246,16 @@ class Session:
 
     def _handle_pasv(self, args: tp.Tuple[str]):
         new_port, port_msg = gen_new_port()
-        self._send(b'215 ' + port_msg.encode())
-        # t = threading.Thread(target=run, args=[new_port])
+
+        self.passive_socket = socket.socket()
+        self.passive_socket.bind(('', new_port))
+        self.passive_socket.listen(1)
+        self.passive_enabled = True
+
+        # t = threading.Thread(target=passive_server, args=[self.passive_socket])
         # t.start()
-        # print(f"[{self.port}] Started child server")
-        # s = Session(new_port)
-        # s.run()
+
+        self._send(b'215 ' + port_msg.encode())
 
     # # # # # # # # #
     # File commands #
@@ -219,9 +272,7 @@ class Session:
         print(x)
         x = subprocess.run(args=x, capture_output=True)
 
-        self._send(b'150 Here comes the directory listing.')
-        self._send_active(x.stdout.strip().split(b'\n'))
-        self._send(b'226 Directory send OK.')
+        self._send_data(b'\r\n'.join(x.stdout.strip().split(b'\n')))
 
     def _handle_mode(self, args: tp.Tuple[str]):
         """
@@ -238,10 +289,10 @@ class Session:
         self._send(b'200 Command OK.')
 
     def _handle_stru(self, args: tp.Tuple[str]):
-        # IS IT OKEY HERE?
         assert len(args) == 1
-        assert args[0] in [Mode.Stream, Mode.Block, Mode.Compressed]
-        self.mode = args[0]
+
+        if args[0].upper() != 'F':
+            self._send(b'504 Command not implemented for that parameter.')
         self._send(b'200 Command OK.')
 
     def _handle_retr(self, args: tp.Tuple[str]):
@@ -259,16 +310,13 @@ class Session:
 
         filepath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + filename)
 
-        if os.path.isfile(filepath):
-            self._send(b'550 Failed to open file.')  # FIXME
-            return
+        if not os.path.isfile(filepath):
+            raise Err550ActionNotTaken()
 
         with open(filepath, 'rb') as file:
             file_data = file.read()
 
-        self._send(b'150 File status okay; about to open data connection')
-        self._send_active([file_data])
-        self._send(b'226 Closing data connection, file transfer successful')
+        self._send_data(file_data)
 
     def _handle_stor(self, args: tp.List[str]):
         """
@@ -284,22 +332,25 @@ class Session:
         filename = args[0]
 
         filepath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + filename)
-        if not os.path.isfile(filepath):
-            self._send(b'550 Failed to open file.')  # FIXME
-            return
+        # if not os.path.isfile(filepath):
+        #     raise Err550ActionNotTaken()
+        # FIXME: check valid filename
 
         with open(filepath, 'wb') as file:
             self._send(b'150 File status okay; about to open data connection.')  # FIXME: check
             data = self._fetch_active()
             file.write(data)
-            self._send(b'226 Closing data connection, file transfer successful')  # FIXME: check
+            self._send(
+                b'226 Closing data connection. Requested file action successful.')  # FIXME: check
 
     def _handle_noop(self, args: tp.List[str]):
         self._send(b'200 Command OK.')
 
     def _handle_cdup(self, args: tp.List[str]):
         assert len(args) == 0
-        assert self.current_dir != '.'
+
+        if self.current_dir == '.':
+            raise Err550ActionNotTaken()
 
         self.current_dir = os.path.normpath(self.current_dir + '/../')
 
@@ -311,10 +362,90 @@ class Session:
         500, 501, 502, 421, 530, 550
         """
         assert len(args) == 1
-        self.current_dir = os.path.normpath(self.current_dir + '/' + args[0])
 
+        new_dir = os.path.normpath(self.current_dir + '/' + args[0])
+        if not os.path.isdir(os.path.normpath(ROOT_DIR + '/' + new_dir)):
+            raise Err550ActionNotTaken()
+
+        self.current_dir = new_dir
         print(f'[{PORT}] Setting working dir to {self.current_dir}')
         self._send(b'250 Directory successfully changed.')
+
+    def _handle_appe(self, args: tp.Tuple[str]):
+        """
+        125, 150
+           (110)
+           226, 250
+           425, 426, 451, 551, 552
+        532, 450, 550, 452, 553
+        500, 501, 502, 421, 530
+        """
+        assert len(args) == 1
+
+        filepath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + args[0])
+        with open(filepath, 'ab') as file:
+            self._send(b'150 File status okay; about to open data connection.')  # FIXME: check
+            data = self._fetch_active()
+            file.write(data)
+            self._send(
+                b'226 Closing data connection. Requested file action successful.')  # FIXME: check
+
+    def _handle_dele(self, args: tp.Tuple[str]):
+        """
+        250
+        450, 550
+        500, 501, 502, 421, 530
+        """
+        assert len(args) == 1
+        filepath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + args[0])
+
+        if not os.path.isfile(filepath):
+            raise Err550ActionNotTaken()
+
+        os.remove(filepath)
+        self._send(b'250 Requested file action completed.')
+
+    def _handle_rmd(self, args: tp.Tuple[str]):
+        """
+        250
+        500, 501, 502, 421, 530, 550
+        """
+        assert len(args) == 1
+        assert args[0] != '.'
+        dirpath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + args[0])
+
+        if not os.path.isdir(dirpath):
+            raise Err550ActionNotTaken()
+
+        os.rmdir(dirpath)
+        self._send(b'250 Requested file action completed.')
+
+    def _handle_mkd(self, args: tp.Tuple[str]):
+        """
+        257
+        500, 501, 502, 421, 530, 550
+        """
+        assert len(args) == 1
+        assert args[0] != '.'
+
+        dirpath = os.path.normpath(ROOT_DIR + '/' + self.current_dir + '/' + args[0])
+
+        os.mkdir(dirpath)
+        self._send(b'250 Requested file action completed.')
+
+    def _handle_nlst(self, args: tp.Tuple[str]):
+        """
+        125, 150
+            226, 250
+            425, 426, 451
+        450
+        500, 501, 502, 421, 530
+        """
+        assert len(args) == 0
+
+        dirpath = os.path.normpath(ROOT_DIR + '/' + self.current_dir)
+        dir_names = filter(lambda path: os.path.isdir(dirpath + '/' + path), os.listdir(dirpath))
+        self._send_data(' '.join(dir_names).encode())
 
     def _fetch_command(self) -> tp.Tuple[str, tp.List[str]]:
         data = self.connection.recv(2048)
@@ -344,7 +475,8 @@ class Session:
                     handler(args=args)
                 else:
                     self._send(b'502 Not implemented')
-
+            except FtpError as exc:
+                self._send(exc.message)
             except E:
                 return
 
@@ -352,6 +484,8 @@ class Session:
         if self.connection:
             self.connection.close()
         self.socket_.close()
+        if self.passive_socket:
+            self.passive_socket.close()
 
 
 def run():

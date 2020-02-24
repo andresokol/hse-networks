@@ -24,6 +24,7 @@ def test_wrapper(test):
                 test(connection)
         except Exception as exc:
             if not QUIET:
+                raise exc
                 print(exc.with_traceback(exc.__traceback__))
             return False
         return True
@@ -91,9 +92,9 @@ def _test_minimal_stor(conn: socket.socket):
     _dummy_start(conn)
 
     myport = utils.get_random_port()
-    passive_socket = socket.socket()
-    passive_socket.bind(('', myport))
-    passive_socket.listen(1)
+    data_socket = socket.socket()
+    data_socket.bind(('', myport))
+    data_socket.listen(1)
 
     port_representation = f'{utils.get_ip().replace(".", ",")},{myport // 256},{myport % 256}'
     conn.send(b'PORT ' + port_representation.encode() + b'\r\n')
@@ -103,10 +104,10 @@ def _test_minimal_stor(conn: socket.socket):
     conn.send(b'STOR demo.txt\r\n')
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode()[:3] == '150'
-    conn_p, _ = passive_socket.accept()
-    conn_p.send(FILE_TXT)
-    conn_p.close()
-    passive_socket.close()
+    data_conn, _ = data_socket.accept()
+    data_conn.send(FILE_TXT)
+    data_conn.close()
+    data_socket.close()
 
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode().split()[0][0] == '2'
@@ -117,9 +118,9 @@ def _test_minimal_retr(conn: socket.socket):
     _dummy_start(conn)
 
     myport = utils.get_random_port()
-    passive_socket = socket.socket()
-    passive_socket.bind(('', myport))
-    passive_socket.listen(1)
+    data_socket = socket.socket()
+    data_socket.bind(('', myport))
+    data_socket.listen(1)
 
     port_representation = f'{utils.get_ip().replace(".", ",")},{myport // 256},{myport % 256}'
     conn.send(b'PORT ' + port_representation.encode() + b'\r\n')
@@ -129,10 +130,10 @@ def _test_minimal_retr(conn: socket.socket):
     conn.send(b'RETR demo.txt\r\n')
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode()[:3] == '150'
-    conn_p, _ = passive_socket.accept()
-    received = conn_p.recv(BYTES_TO_LISTEN)
-    conn_p.close()
-    passive_socket.close()
+    data_conn, _ = data_socket.accept()
+    received = data_conn.recv(BYTES_TO_LISTEN)
+    data_conn.close()
+    data_socket.close()
 
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode().split()[0][0] == '2'
@@ -178,9 +179,9 @@ def _test_dele(conn: socket.socket):
     _dummy_start(conn)
 
     myport = utils.get_random_port()
-    passive_socket = socket.socket()
-    passive_socket.bind(('', myport))
-    passive_socket.listen(1)
+    data_socket = socket.socket()
+    data_socket.bind(('', myport))
+    data_socket.listen(1)
 
     port_representation = f'{utils.get_ip().replace(".", ",")},{myport // 256},{myport % 256}'
     conn.send(b'PORT ' + port_representation.encode() + b'\r\n')
@@ -190,10 +191,10 @@ def _test_dele(conn: socket.socket):
     conn.send(b'STOR demo2.txt\r\n')
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode()[:3] == '150'
-    conn_p, _ = passive_socket.accept()
-    conn_p.send(FILE_TXT)
-    conn_p.close()
-    passive_socket.close()
+    data_conn, _ = data_socket.accept()
+    data_conn.send(FILE_TXT)
+    data_conn.close()
+    data_socket.close()
     conn.recv(BYTES_TO_LISTEN)
 
     conn.send(b'DELE demo2.txt\r\n')
@@ -217,14 +218,22 @@ def _test_pasv(conn: socket.socket):
     limbs = conn_str.split(',')
     passive_addr = (f'{limbs[0]}.{limbs[1]}.{limbs[2]}.{limbs[3]}',
                     int(limbs[4]) * 256 + int(limbs[5]))
-    print(passive_addr)
 
     conn.send(b'STOR pixel.png\r\n')
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode()[:3] == '150'
 
-    with socket.create_connection(passive_addr) as conn:
-        conn.send(FILE_PNG)
+    with socket.create_connection(passive_addr) as data_conn:
+        data_conn.send(FILE_PNG)
+    data = conn.recv(BYTES_TO_LISTEN)
+    assert data.decode()[0] == '2'
+
+    conn.send(b'RETR pixel.png\r\n')
+    data = conn.recv(BYTES_TO_LISTEN)
+    assert data.decode()[:3] == '150'
+
+    with socket.create_connection(passive_addr) as data_conn:
+        data_conn.recv(BYTES_TO_LISTEN)
     data = conn.recv(BYTES_TO_LISTEN)
     assert data.decode()[0] == '2'
 

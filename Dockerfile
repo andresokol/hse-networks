@@ -5,8 +5,6 @@ LABEL maintainer="sokolov-as-i@yandex.ru"
 RUN apt-get -qq update
 RUN apt-get -qqy install python3.7
 
-EXPOSE 9000-11000
-
 WORKDIR /var/ftp/
 ENV HW1_MODE=server
 #ENV HW1_HOST=127.0.0.1

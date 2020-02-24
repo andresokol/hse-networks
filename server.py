@@ -19,8 +19,7 @@ class E(BaseException):
 
 
 def gen_new_port() -> tp.Tuple[int, str]:
-    # np = utils.get_random_port()
-    np = 9080
+    np = utils.get_random_port()
     comma_separeted_host = utils.get_ip().replace('.', ',')
     return np, f'{comma_separeted_host},{np // 256},{np % 256}'
 
@@ -128,30 +127,45 @@ class Session:
     def _send_data(self, data: bytes):
         self._send(b'150 File status okay; about to open data connection')
         if self.passive_enabled:
+            if not self.passive_socket:
+                raise FtpError(b'500')
             print(f'Waiting passive data connection')
             conn, addr = self.passive_socket.accept()
             print(f'Got connection from {addr}')
             conn.send(data + b'\r\n')
             conn.close()
         else:
+            if not self.active_addr:
+                raise FtpError(b'500')
             with socket.create_connection(self.active_addr) as connection:
                 print(f'[{self.active_addr}] SEND ACTIVE: {data}')
                 connection.send(data + b'\r\n')
         self._send(b'226 Closing data connection. Requested file action successful.')
 
-    def _fetch_active(self):
-        if not self.active_addr:
-            print('dafuq')
-            return
-
+    def _fetch_data(self):
         data = bytes()
-        with socket.create_connection(self.active_addr) as connection:
+
+        if self.passive_enabled:
+            if not self.passive_socket:
+                raise FtpError(b'500')
+            print(f'Waiting passive data connection')
+            conn, addr = self.passive_socket.accept()
+            print(f'Got connection from {addr}')
+        else:
+            if not self.active_addr:
+                raise FtpError(b'500')
+            conn = socket.create_connection(self.active_addr)
+
+        try:
             while True:
-                data_block = connection.recv(4096)
+                data_block = conn.recv(4096)
                 if not data_block:
                     break
                 data += data_block
                 print('.', end='')
+        finally:
+            conn.close()
+
         print('\nreceived', len(data), ' bytes')
         return data
 
@@ -333,7 +347,7 @@ class Session:
 
         with open(filepath, 'wb') as file:
             self._send(b'150 File status okay; about to open data connection.')  # FIXME: check
-            data = self._fetch_active()
+            data = self._fetch_data()
             file.write(data)
             self._send(
                 b'226 Closing data connection. Requested file action successful.')  # FIXME: check
@@ -474,6 +488,11 @@ class Session:
                 self._send(exc.message)
             except E:
                 return
+            except KeyboardInterrupt:
+                return
+            except Exception as exc:
+                print(f'got error {exc}, continue...')
+                self._send(b'500')
 
     def __del__(self):
         if self.connection:
